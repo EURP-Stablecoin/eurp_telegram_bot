@@ -69,10 +69,9 @@ async function handleLog(log) {
         const to = parsed.args.to;
         const value = parsed.args.value;
 
-        // 🧠 Filter only transfers where from or to is zero address
         const ZERO = "0x0000000000000000000000000000000000000000";
         if (from.toLowerCase() !== ZERO && to.toLowerCase() !== ZERO) {
-            return; // skip normal transfers
+            return;
         }
 
         const type = from.toLowerCase() === ZERO ? "🪙 Mint" : "🔥 Burn";
@@ -113,32 +112,48 @@ async function handleLog(log) {
 }
 
 function startListening() {
-    console.log("Listening for Mint/Burn Transfer events on Base RPC:", RPC_URL);
+    console.log("Polling new blocks for Mint/Burn events on Base RPC:", RPC_URL);
 
-    const filter = {
-        address: TOKEN_ADDRESS,
-        topics: [TRANSFER_TOPIC]
-    };
+    let lastProcessedBlock = 0;
+    const minConf = Number(CONFIRMATIONS);
 
-    provider.on(filter, async (log) => {
-        if (!log || !log.transactionHash) return;
-        const minConfirmations = Number(CONFIRMATIONS || 1);
-        if (minConfirmations > 1) {
-            try {
-                const latest = await provider.getBlockNumber();
-                if (log.blockNumber + minConfirmations - 1 > latest) {
-                    setTimeout(() => provider.getBlock(log.blockNumber).catch(() => {}), 30000);
-                    return;
+    provider.on("block", async (blockNumber) => {
+        try {
+            // first run
+            if (!lastProcessedBlock) {
+                lastProcessedBlock = blockNumber - 1;
+            }
+
+            const fromBlock = lastProcessedBlock + 1;
+            const toBlock = blockNumber;
+
+            if (toBlock < fromBlock) return;
+
+            const filter = {
+                address: TOKEN_ADDRESS,
+                topics: [TRANSFER_TOPIC],
+                fromBlock,
+                toBlock
+            };
+
+            const logs = await provider.getLogs(filter);
+
+            for (const log of logs) {
+                // manual confirmation check if needed
+                if (minConf > 1) {
+                    const latest = await provider.getBlockNumber();
+                    if (log.blockNumber + minConf - 1 > latest) {
+                        continue;
+                    }
                 }
-            } catch {}
-        }
-        handleLog(log).catch(err => console.error("handleLog error :", err));
-    });
+                await handleLog(log);
+            }
 
-    if (provider instanceof ethers.WebSocketProvider) {
-        provider.on("error", (err) => console.error("Provider error:", err));
-        provider.on("close", () => console.warn("Provider connection closed — attempting to reconnect..."));
-    }
+            lastProcessedBlock = blockNumber;
+        } catch (err) {
+            console.error("Error while polling new blocks:", err);
+        }
+    });
 }
 
 (async () => {
